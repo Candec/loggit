@@ -1,0 +1,178 @@
+#!/bin/bash
+
+# Configuration
+CONFIG="$(dirname "$0")/.log_script_config"
+DEFAULT_FILE="output.txt"
+
+# Initialize configuration with empty slots
+initialize_config() {
+    [ -f "$CONFIG" ] || {
+        echo "last_used:" > "$CONFIG"
+        for c in {a..e}; do echo "$c:" >> "$CONFIG"; done
+    }
+}
+
+# Read and validate configuration
+read_config() {
+    declare -gA slots=()  # Explicit associative array
+    declare -g last_used
+    
+    while IFS=: read -r key value; do
+        case $key in
+            a|b|c|d|e)
+                # Verify file existence
+                if [ -n "$value" ] && [ ! -f "$value" ]; then
+                    echo "Warning: File '$value' not found. Clearing slot $key."
+                    value=""
+                fi
+                slots[$key]="$value"
+                ;;
+            last_used)
+                last_used="$value"
+                ;;
+        esac
+    done < "$CONFIG"
+}
+
+# Slot management
+assign_slot() {
+    local file="$1"
+    
+    # Check existing assignments first
+    for c in {a..e}; do
+        if [ "${slots[$c]}" = "$file" ]; then
+            echo "Warning: File already in slot '$c'"
+            return
+        fi
+        if [ "${slots[$c]}" != "" ] && [ "$(basename "${slots[$c]}")" = "$(basename "$file")" ] && [ "$(dirname "${slots[$c]}")" = "$(dirname "$file")" ]; then
+            echo "Warning: File with the same name already exists in this directory."
+            echo "Please choose a different name or directory."
+            return
+        fi
+    done
+
+    # Find empty slot
+    for c in {a..e}; do
+        if [ -z "${slots[$c]}" ]; then
+            slots[$c]="$file"
+            last_used="$c"
+            echo "Assigned $file to slot $c"
+	    update_config
+            return
+        fi
+    done
+
+    # No slots available - replacement
+    echo "No available slots. Current files:"
+    for c in {a..e}; do echo " $c) ${slots[$c]}"; done
+    while true; do
+        read -rp "Choose slot to replace (a-e): " chosen
+        case $chosen in
+            [a-e])
+                slots[$chosen]="$file"
+                last_used="$chosen"
+                update_config  # Update config after replacement
+                return
+                ;;
+            *) echo "Invalid choice, try again" ;;
+        esac
+    done
+}
+
+# Update configuration
+update_config() {
+    {
+        echo "last_used:$last_used"
+        for c in {a..e}; do echo "$c:${slots[$c]}" ; done
+    } > "$CONFIG"
+}
+
+# Help documentation
+show_help() {
+    cat << EOF
+Usage: $0 [OPTIONS] [MESSAGE]
+
+Options:
+  -h, --help      Show this help
+  -f              List tracked files
+  -F, --file FILE Add new file to track
+  -a ... -e       Log to specific slot
+
+File Management:
+  - Tracks 5 files (a-e)
+  - Uses last used slot by default
+EOF
+}
+
+# Main script
+initialize_config
+read_config
+
+declare -a targets
+declare -a messages
+
+# Parse arguments FIRST
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help) show_help; exit 0 ;;
+        -f)
+            echo "Tracked files:"
+            for c in {a..e}; do
+                [ -n "${slots[$c]}" ] && echo " $c) ${slots[$c]}"
+            done
+            exit 0
+            ;;
+        -F|--file)
+		file=$(readlink -f "$2")
+		if [ "$file" == "" ]; then
+		    echo "Error: No file provided. Use -F <file>"
+		    update_config
+		    exit 1
+		fi
+            
+	    mkdir -p "$(dirname "$file")" && touch "$file"
+            assign_slot "$file"
+            shift 2
+
+	    # Optional: Break if no more arguments
+	    if [ $# -eq 0 ]; then
+		    update_config
+		    exit 0
+	    fi
+	    ;;
+        -[a-e])
+            slot="${1#-}"
+            [ -n "${slots[$slot]}" ] || {
+                echo "Error: Slot $slot has no file. Use -F first."
+                exit 1
+            }
+            targets+=("${slots[$slot]}")
+            last_used="$slot"
+            shift
+            ;;
+        *)
+            messages+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Post-argument validation
+if [ ${#targets[@]} -eq 0 ]; then
+    if [ -n "$last_used" ] && [ -n "${slots[$last_used]}" ]; then
+        targets+=("${slots[$last_used]}")
+    else
+        echo "Error: No files tracked. Use: loggit -F <file>"
+        exit 1
+    fi
+fi
+
+# Write to files
+for target in "${targets[@]}"; do
+    formatted="$(date +"%H:%M | %d/%m/%Y - [${messages[*]-}]")"
+    echo "$formatted" >> "$target"
+    echo "Logged to $target"
+done
+
+update_config
+
